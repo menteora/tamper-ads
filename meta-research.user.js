@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.5.3.5
-// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share
+// @version      0.5.3.6
+// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v5.3.5 RADAR';
+  var VERSION = 'v5.3.6 RADAR';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -54,6 +54,7 @@
     analysisOpen: false,
     analysisBusy: false,
     collapsed: false,
+    panelTop: false,
     uiTimer: null,
     lastUIRender: 0
   };
@@ -875,6 +876,7 @@
       'READY: ' + document.readyState,
       'UI: ' + !!document.getElementById('mr-core'),
       'COLLAPSED: ' + state.collapsed,
+      'PANEL TOP: ' + state.panelTop,
       'DB ADS: ' + dbCount(),
       'ANALYSIS OPEN: ' + state.analysisOpen,
       'ANALYSIS BUSY: ' + state.analysisBusy,
@@ -958,6 +960,31 @@
     box.appendChild(btn);
   }
 
+  function installMoveToggle(box) {
+    if (!box || document.getElementById('mr-move-toggle')) return;
+    var btn = make('button', '↑');
+    btn.id = 'mr-move-toggle';
+    btn.title = 'Sposta in alto';
+    btn.style.cssText = 'position:absolute!important;top:6px!important;right:42px!important;z-index:2147483647!important;width:30px!important;height:28px!important;padding:0!important;margin:0!important;font-size:17px!important;line-height:24px!important;';
+    btn.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.panelTop = !state.panelTop;
+      if (state.panelTop) {
+        box.style.setProperty('top', '8px', 'important');
+        box.style.setProperty('bottom', 'auto', 'important');
+        btn.textContent = '↓';
+        btn.title = 'Sposta in basso';
+      } else {
+        box.style.setProperty('bottom', '8px', 'important');
+        box.style.setProperty('top', 'auto', 'important');
+        btn.textContent = '↑';
+        btn.title = 'Sposta in alto';
+      }
+    });
+    box.appendChild(btn);
+  }
+
   function createUI() {
     if (!document.body) { setTimeout(createUI, 200); return; }
     if (document.getElementById('mr-core')) return;
@@ -969,7 +996,7 @@
     title.style.fontWeight = 'bold';
     title.style.fontSize = '15px';
     title.style.marginBottom = '5px';
-    title.style.paddingRight = '38px';
+    title.style.paddingRight = '74px';
     box.appendChild(title);
 
     ui.count = make('div', '0 ADS');
@@ -1018,6 +1045,7 @@
     box.appendChild(row);
     document.body.appendChild(box);
     installSafeCollapse(box);
+    installMoveToggle(box);
 
     ui.analysis = make('div');
     ui.analysis.style.cssText = 'display:none;position:fixed;left:6px;right:6px;top:6px;bottom:6px;z-index:2147483647;background:#111;color:#fff;padding:10px;box-sizing:border-box;border:2px solid #f2c94c;border-radius:8px;font-family:Arial,sans-serif;';
