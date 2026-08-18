@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.5.3.4
-// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse
+// @version      0.5.3.5
+// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v5.3.4 RADAR';
+  var VERSION = 'v5.3.5 RADAR';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -481,14 +481,14 @@
     return '"' + String(value === undefined || value === null ? '' : value).replace(/"/g, '""') + '"';
   }
 
-  function exportCSV() {
+  function buildCSVData() {
     var fields = [
       'library_id','page_id','page_name','is_active','start_date','days_active',
       'country','keyword','countries_seen','keywords_seen','observed_dates','body',
       'title','caption','cta','landing_url','media_url','source','first_seen','last_seen','ad_library_url'
     ];
     var rows = Object.keys(db).map(function (id) { return db[id]; });
-    if (!rows.length) { alert('Nessuna inserzione raccolta.'); return; }
+    if (!rows.length) return null;
     var csv = fields.join(',') + '\n' + rows.map(function (row) {
       return fields.map(function (field) {
         var value = row[field];
@@ -496,15 +496,76 @@
         return csvEscape(value);
       }).join(',');
     }).join('\n');
-    var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    return {
+      csv: '\ufeff' + csv,
+      filename: 'meta-ads-' + (getParam('country') || 'ALL') + '-' + today() + '.csv'
+    };
+  }
+
+  function downloadCSVData(data) {
+    var blob = new Blob([data.csv], { type: 'text/csv;charset=utf-8' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'meta-ads-' + (getParam('country') || 'ALL') + '-' + today() + '.csv';
+    a.download = data.filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function exportCSV() {
+    var data = buildCSVData();
+    if (!data) {
+      alert('Nessuna inserzione raccolta.');
+      return;
+    }
+    downloadCSVData(data);
+  }
+
+  function shareCSV() {
+    var data = buildCSVData();
+    if (!data) {
+      alert('Nessuna inserzione raccolta.');
+      return;
+    }
+
+    if (typeof File !== 'function' || typeof navigator.share !== 'function') {
+      downloadCSVData(data);
+      return;
+    }
+
+    var file = new File([data.csv], data.filename, { type: 'text/csv;charset=utf-8' });
+    var shareData = {
+      title: 'Meta Research CSV',
+      text: dbCount() + ' ads raccolte - ' + VERSION,
+      files: [file]
+    };
+
+    if (typeof navigator.canShare === 'function') {
+      try {
+        if (!navigator.canShare({ files: [file] })) {
+          downloadCSVData(data);
+          return;
+        }
+      } catch (e) {
+        downloadCSVData(data);
+        return;
+      }
+    }
+
+    try {
+      navigator.share(shareData).catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        state.lastError = 'SHARE: ' + String(err && (err.message || err) || 'errore');
+        downloadCSVData(data);
+        updateUI();
+      });
+    } catch (e) {
+      state.lastError = 'SHARE: ' + String(e);
+      downloadCSVData(data);
+      updateUI();
+    }
   }
 
   var PROBLEM_PATTERNS = [
@@ -946,6 +1007,7 @@
     row.appendChild(button('SCAN', scanScripts));
     row.appendChild(button('DIAGNOSI', showDiag));
     row.appendChild(button('CSV', exportCSV));
+    row.appendChild(button('CONDIVIDI', shareCSV));
     row.appendChild(button('RESET', function () {
       if (!confirm('Cancellare il database Meta Research?')) return;
       db = {};
