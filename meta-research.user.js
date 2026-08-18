@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.5.3.6
-// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle
+// @version      0.5.3.7
+// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle + wake lock
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v5.3.6 RADAR';
+  var VERSION = 'v5.3.7 RADAR';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -55,6 +55,8 @@
     analysisBusy: false,
     collapsed: false,
     panelTop: false,
+    wakeLock: null,
+    wakeLockActive: false,
     uiTimer: null,
     lastUIRender: 0
   };
@@ -419,6 +421,59 @@
     updateUI();
   }
 
+  function requestWakeLock() {
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
+      state.wakeLock = null;
+      state.wakeLockActive = false;
+      updateUI();
+      return;
+    }
+
+    if (state.wakeLockActive && state.wakeLock) return;
+
+    try {
+      navigator.wakeLock.request('screen').then(function (lock) {
+        state.wakeLock = lock;
+        state.wakeLockActive = true;
+
+        try {
+          lock.addEventListener('release', function () {
+            state.wakeLockActive = false;
+            state.wakeLock = null;
+            updateUI();
+          });
+        } catch (e) {}
+
+        updateUI();
+      }).catch(function (err) {
+        state.wakeLock = null;
+        state.wakeLockActive = false;
+        state.lastError = 'WAKE LOCK: ' + String(err && (err.message || err) || 'errore');
+        updateUI();
+      });
+    } catch (e) {
+      state.wakeLock = null;
+      state.wakeLockActive = false;
+      state.lastError = 'WAKE LOCK: ' + String(e);
+      updateUI();
+    }
+  }
+
+  function releaseWakeLock() {
+    var lock = state.wakeLock;
+    state.wakeLock = null;
+    state.wakeLockActive = false;
+
+    if (lock && typeof lock.release === 'function') {
+      try {
+        var p = lock.release();
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+      } catch (e) {}
+    }
+
+    updateUI();
+  }
+
   function scanScripts() {
     if (state.scanBusy) return;
     state.scanBusy = true;
@@ -459,6 +514,7 @@
     state.stopAt = Date.now() + seconds * 1000;
     state.scrolls = 0;
     installHooks();
+    requestWakeLock();
     setTimeout(scanScripts, 100);
     state.timer = setInterval(function () {
       if (Date.now() >= state.stopAt) { stop(); return; }
@@ -473,6 +529,7 @@
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
     state.running = false;
+    releaseWakeLock();
     saveDB();
     setTimeout(restoreHooks, 1500);
     updateUI();
@@ -877,6 +934,8 @@
       'UI: ' + !!document.getElementById('mr-core'),
       'COLLAPSED: ' + state.collapsed,
       'PANEL TOP: ' + state.panelTop,
+      'WAKE LOCK SUPPORTED: ' + !!(navigator.wakeLock && typeof navigator.wakeLock.request === 'function'),
+      'WAKE LOCK ACTIVE: ' + state.wakeLockActive,
       'DB ADS: ' + dbCount(),
       'ANALYSIS OPEN: ' + state.analysisOpen,
       'ANALYSIS BUSY: ' + state.analysisBusy,
@@ -912,7 +971,7 @@
     ui.session.textContent = 'SESSIONE ' + Object.keys(state.sessionNew).length + ' NUOVE | ' + Object.keys(state.sessionKnown).length + ' NOTE';
     if (state.running) {
       var remain = Math.max(0, Math.ceil((state.stopAt - Date.now()) / 1000));
-      ui.status.textContent = remain + 's | GQL ' + state.graphqlRequests + ' | CODA ' + state.queue.length;
+      ui.status.textContent = remain + 's | GQL ' + state.graphqlRequests + ' | WAKE ' + (state.wakeLockActive ? 'ON' : 'OFF');
     } else if (state.queueBusy || state.scanBusy) {
       ui.status.textContent = 'PARSING | ADS ' + dbCount() + ' | CODA ' + state.queue.length;
     } else {
@@ -1086,6 +1145,12 @@
 
     updateUI();
   }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && state.running && !state.wakeLockActive) {
+      requestWakeLock();
+    }
+  });
 
   window.addEventListener('error', function (event) {
     state.lastError = 'JS: ' + (event.message || 'errore');
