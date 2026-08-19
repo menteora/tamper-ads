@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.5.3.7
-// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle + wake lock
+// @version      0.5.3.8
+// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle + wake lock + ad-count sorting
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v5.3.7 RADAR';
+  var VERSION = 'v5.3.8 RADAR';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -803,6 +803,7 @@
   function filterGroups(groups) {
     return groups.filter(function (g) {
       if (state.activeFilter === 'ALL') return true;
+      if (state.activeFilter === 'ADS') return true;
       if (state.activeFilter === 'TOP') return g.score >= TOP_SCORE;
       if (state.activeFilter === '15D') return g.oldestDays >= 15;
       if (state.activeFilter === '3ADS') return g.ads.length >= 3;
@@ -827,7 +828,7 @@
 
   function renderFilterButtons() {
     if (!ui.analysisFilters) return;
-    var defs = [['TOP','TOP'],['15D','15+ GG'],['3ADS','3+ ADS'],['PROBLEM','PROBLEMA'],['ALL','TUTTI']];
+    var defs = [['TOP','TOP'],['ADS','N. ADS ↓'],['15D','15+ GG'],['3ADS','3+ ADS'],['PROBLEM','PROBLEMA'],['ALL','TUTTI']];
     ui.analysisFilters.textContent = '';
     defs.forEach(function (def) {
       var b = button(def[1], function () {
@@ -850,6 +851,12 @@
       try {
         var groups = buildGroups();
         var filtered = filterGroups(groups);
+        if (state.activeFilter === 'ADS') {
+          filtered.sort(function (a, b) {
+            if (b.ads.length !== a.ads.length) return b.ads.length - a.ads.length;
+            return b.score - a.score;
+          });
+        }
         var topCount = groups.filter(function (x) { return x.score >= TOP_SCORE; }).length;
         ui.analysisSummary.textContent = dbCount() + ' ADS | ' + groups.length + ' GRUPPI | ' + topCount + ' TOP';
         renderFilterButtons();
