@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.5.3.8
-// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + collapse + CSV share + panel position toggle + wake lock + ad-count sorting
+// @version      0.6.0.0
+// @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + rich CSV/JSON export (formats, platforms, cards, offer signals) for social-business-manager
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
@@ -14,7 +14,8 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v5.3.8 RADAR';
+  var VERSION = 'v6.0.0 RADAR';
+  var SCHEMA_VERSION = 2;
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -184,17 +185,24 @@
     return '';
   }
 
+  // Some payloads/versions repeat the same copy 2-3 times back to back: collapse it.
+  function collapseRepeats(text) {
+    var m = /^(.{20,}?)(?:\s+\1){1,2}$/.exec(text);
+    return m ? m[1] : text;
+  }
+
   function extractBody(snapshot) {
     if (!snapshot || typeof snapshot !== 'object') return '';
     var body = snapshot.body;
-    if (typeof body === 'string') return clean(body).slice(0, 3000);
-    if (body && typeof body === 'object') {
-      if (body.text) return clean(body.text).slice(0, 3000);
-      if (body.markup && body.markup.__html) return clean(body.markup.__html).slice(0, 3000);
-      if (body.__html) return clean(body.__html).slice(0, 3000);
+    var text = '';
+    if (typeof body === 'string') text = clean(body);
+    else if (body && typeof body === 'object') {
+      if (body.text) text = clean(body.text);
+      else if (body.markup && body.markup.__html) text = clean(body.markup.__html);
+      else if (body.__html) text = clean(body.__html);
     }
-    if (snapshot.body_text) return clean(snapshot.body_text).slice(0, 3000);
-    return '';
+    if (!text && snapshot.body_text) text = clean(snapshot.body_text);
+    return collapseRepeats(text).slice(0, 3000);
   }
 
   function findMedia(obj, depth) {
@@ -226,6 +234,56 @@
     return '';
   }
 
+  function toList(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter(function (x) { return x !== null && x !== undefined && x !== ''; });
+  }
+
+  function compactCards(cards) {
+    var out = [];
+    cards = toList(cards);
+    for (var i = 0; i < cards.length && i < 8; i++) {
+      var c = cards[i] || {};
+      var item = {
+        title: clean(c.title).slice(0, 200),
+        link_url: clean(firstValue([c.link_url, c.linkUrl])),
+        cta_type: clean(firstValue([c.cta_type, c.ctaType]))
+      };
+      if (item.title || item.link_url) out.push(item);
+    }
+    return out;
+  }
+
+  function firstVideo(snapshot) {
+    var videos = toList(snapshot.videos);
+    for (var i = 0; i < videos.length; i++) {
+      var v = videos[i] || {};
+      if (v.video_hd_url || v.video_sd_url || v.video_preview_image_url) return v;
+    }
+    var cards = toList(snapshot.cards);
+    for (var j = 0; j < cards.length; j++) {
+      var c = cards[j] || {};
+      if (c.video_hd_url || c.video_sd_url || c.video_preview_image_url) return c;
+    }
+    return null;
+  }
+
+  function firstImageUrl(snapshot) {
+    var images = toList(snapshot.images);
+    for (var i = 0; i < images.length; i++) {
+      var im = images[i] || {};
+      var u = firstValue([im.original_image_url, im.resized_image_url]);
+      if (typeof u === 'string' && /^https?:\/\//.test(u)) return u;
+    }
+    var cards = toList(snapshot.cards);
+    for (var j = 0; j < cards.length; j++) {
+      var c = cards[j] || {};
+      var cu = firstValue([c.original_image_url, c.resized_image_url]);
+      if (typeof cu === 'string' && /^https?:\/\//.test(cu)) return cu;
+    }
+    return '';
+  }
+
   function saveObject(obj, source) {
     if (!obj || typeof obj !== 'object') return;
     var id = getAdId(obj);
@@ -237,29 +295,77 @@
       obj.start_date, obj.startDate,
       obj.ad_delivery_start_time, obj.adDeliveryStartTime
     ]));
+    var endDate = normalizeDate(firstValue([
+      obj.end_date, obj.endDate,
+      obj.ad_delivery_stop_time, obj.adDeliveryStopTime
+    ]));
     var landing = clean(firstValue([
       snapshot.link_url, snapshot.linkUrl,
       snapshot.website_url, snapshot.websiteUrl,
       obj.link_url, obj.linkUrl, old.landing_url
     ]));
-    upsert(id, {
+    var cards = compactCards(snapshot.cards);
+    var video = firstVideo(snapshot);
+    var body = extractBody(snapshot);
+    if (!body) {
+      var cardList = toList(snapshot.cards);
+      for (var c = 0; c < cardList.length && !body; c++) {
+        if (cardList[c] && typeof cardList[c].body === 'string') body = clean(cardList[c].body).slice(0, 3000);
+      }
+    }
+    var platforms = toList(firstValue([obj.publisher_platform, obj.publisherPlatform]));
+    var categories = toList(firstValue([snapshot.page_categories, snapshot.pageCategories]));
+    var reachedCountries = toList(obj.targeted_or_reached_countries);
+    var likeCount = firstValue([snapshot.page_like_count, snapshot.pageLikeCount]);
+    var patch = {
+      schema_version: SCHEMA_VERSION,
       page_id: clean(firstValue([obj.page_id, obj.pageID, obj.pageId, page.id, old.page_id])),
       page_name: clean(firstValue([obj.page_name, obj.pageName, page.name, old.page_name])),
       is_active: firstValue([obj.is_active, obj.isActive, old.is_active]),
       start_date: startDate || old.start_date || '',
+      end_date: endDate || old.end_date || '',
       days_active: startDate ? daysSince(startDate) : (old.days_active || ''),
-      body: extractBody(snapshot) || old.body || '',
+      body: body || old.body || '',
       title: clean(firstValue([snapshot.title, snapshot.link_description, snapshot.linkDescription, old.title])).slice(0, 1000),
+      link_description: clean(firstValue([snapshot.link_description, snapshot.linkDescription])).slice(0, 1000),
       caption: clean(firstValue([snapshot.caption, old.caption])).slice(0, 1000),
       cta: clean(firstValue([snapshot.cta_text, snapshot.ctaText, old.cta])),
+      cta_type: clean(firstValue([snapshot.cta_type, snapshot.ctaType])),
+      display_format: clean(firstValue([snapshot.display_format, snapshot.displayFormat])),
+      platforms: platforms,
       landing_url: landing,
       media_url: findMedia(snapshot, 0) || old.media_url || '',
+      image_url: firstImageUrl(snapshot),
+      video_hd_url: video ? clean(firstValue([video.video_hd_url, video.videoHdUrl])) : '',
+      video_sd_url: video ? clean(firstValue([video.video_sd_url, video.videoSdUrl])) : '',
+      video_preview_url: video ? clean(firstValue([video.video_preview_image_url, video.videoPreviewImageUrl])) : '',
+      image_count: toList(snapshot.images).length,
+      video_count: toList(snapshot.videos).length,
+      card_count: toList(snapshot.cards).length,
+      cards: cards.length ? cards : '',
+      page_like_count: (likeCount === undefined || likeCount === null) ? '' : likeCount,
+      page_categories: categories.length ? categories : '',
+      page_profile_uri: clean(firstValue([snapshot.page_profile_uri, snapshot.pageProfileUri])),
+      byline: clean(snapshot.byline),
+      disclaimer_label: clean(snapshot.disclaimer_label),
+      branded_content: snapshot.branded_content ? true : false,
+      is_reshared: snapshot.is_reshared ? true : false,
+      ai_generated: obj.contains_digital_created_media ? true : false,
+      page_is_deleted: obj.page_is_deleted ? true : false,
+      collation_id: clean(obj.collation_id),
+      collation_count: (obj.collation_count === undefined || obj.collation_count === null) ? '' : obj.collation_count,
+      total_active_time: (obj.total_active_time === undefined || obj.total_active_time === null) ? '' : obj.total_active_time,
+      reach_estimate: (obj.reach_estimate === undefined || obj.reach_estimate === null) ? '' : obj.reach_estimate,
+      spend: (obj.spend === undefined || obj.spend === null) ? '' : obj.spend,
+      currency: clean(obj.currency),
+      reached_countries: reachedCountries.length ? reachedCountries : '',
       country: getParam('country'),
       keyword: getParam('q'),
       source: source,
       last_seen: nowISO(),
       ad_library_url: 'https://www.facebook.com/ads/library/?id=' + id
-    });
+    };
+    upsert(id, patch);
   }
 
   function rawIds(text, source) {
@@ -539,20 +645,154 @@
     return '"' + String(value === undefined || value === null ? '' : value).replace(/"/g, '""') + '"';
   }
 
+  // ---------------------------------------------------------------------------
+  // Derived signals (computed at export time, never stored in the DB)
+  // ---------------------------------------------------------------------------
+
+  function hashText(text) {
+    var h = 5381, str = String(text || '');
+    for (var i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+
+  function copyFingerprint(ad) {
+    var text = clean((ad.body || '') + '|' + (ad.title || '') + '|' + (ad.cta_type || ad.cta || '') + '|' + landingIdentity(ad.landing_url)).toLowerCase();
+    return text.length > 3 ? hashText(text) : '';
+  }
+
+  function mediaExpiry(url) {
+    // Meta CDN links carry a hex Unix expiry in the "oe" query parameter.
+    var m = /[?&]oe=([0-9a-f]{6,10})(?:&|$)/i.exec(String(url || ''));
+    if (!m) return '';
+    var n = parseInt(m[1], 16);
+    if (!isFinite(n) || n < 1000000000 || n > 4000000000) return '';
+    return new Date(n * 1000).toISOString();
+  }
+
+  function countMatches(text, re) {
+    var m = text.match(re);
+    return m ? m.length : 0;
+  }
+
+  function ageBucket(days) {
+    var n = Number(days);
+    if (!isFinite(n) || days === '') return '';
+    if (n < 3) return '0-2';
+    if (n < 15) return '3-14';
+    if (n < 31) return '15-30';
+    if (n < 61) return '31-60';
+    return '61+';
+  }
+
+  function deriveSignals(ad) {
+    var body = String(ad.body || '');
+    var title = String(ad.title || '');
+    var text = body + ' ' + title + ' ' + (ad.link_description || '');
+    var out = {};
+
+    var firstLine = clean(body.split(/[\n.!?]/)[0] || '');
+    out.hook = firstLine.slice(0, 140);
+    out.word_count = body ? clean(body).split(' ').length : 0;
+    try { out.emoji_count = countMatches(body, new RegExp('\\p{Extended_Pictographic}', 'gu')); }
+    catch (e) { out.emoji_count = ''; }
+    out.hashtag_count = countMatches(body, /(^|\s)#[\p{L}\d_]+/gu);
+    out.mention_count = countMatches(body, /(^|\s)@[\w.]+/g);
+    out.ugc_style = (out.hashtag_count > 0 || out.mention_count > 0) ? true : false;
+
+    var pct = /(\d{1,2})\s?%\s?(?:off|di sconto|sconto|de descuento|de réduction)?/i.exec(text) || /(?:sconto|off|-)\s?(\d{1,2})\s?%/i.exec(text);
+    out.offer_percent = pct ? Number(pct[1]) : '';
+    var amt = /[€$£]\s?(\d{1,4})\s*(?:off|di sconto|sconto)/i.exec(text) || /(\d{1,4})\s?[€$£]\s*(?:off|di sconto|sconto)/i.exec(text);
+    out.offer_amount = amt ? Number(amt[1]) : '';
+    var thr = /(?:orders?|ordini|acquisti|spese)\s*(?:of|di|over|sopra|da)?\s*[€$£]?\s?(\d{2,5})\s?[€$£]?\s?\+/i.exec(text) || /[€$£]\s?(\d{2,5})\s?\+/.exec(text);
+    out.offer_threshold = thr ? Number(thr[1]) : '';
+    var codeMatch = /(?:code|codice|coupon|promo)\s*[:\-]?\s*([A-Z0-9]{3,20})\b/.exec(text);
+    var urlCode = /\/discount\/([A-Za-z0-9_-]{3,30})/.exec(String(ad.landing_url || ''));
+    out.discount_code = codeMatch ? codeMatch[1] : (urlCode ? urlCode[1].toUpperCase() : '');
+    out.has_offer = (out.offer_percent !== '' || out.offer_amount !== '' || out.discount_code) ? true : false;
+    out.free_shipping = /free shipping|spedizione (?:gratuita|gratis)|envío gratis|livraison gratuite/i.test(text);
+    out.urgency = /today only|limited time|last chance|hurry|don.t wait|solo oggi|ultime ore|ultimi pezzi|scade|offerta a tempo|tempo limitato/i.test(text);
+
+    var stars = countMatches(body, /[⭐★]/g);
+    var quote = /[“"«][^”"»]{12,200}[”"»]\s*[-–—]\s*[A-Z][\p{L}.\s]{1,30}/u.test(body);
+    out.star_count = stars;
+    out.has_review = (stars > 0 || quote) ? true : false;
+    out.has_checklist = countMatches(body, /[✔✅☑]/g) >= 2;
+    out.is_dynamic_template = /\{\{[^}]+\}\}/.test(title + ' ' + body);
+    out.copy_fingerprint = copyFingerprint(ad);
+
+    out.landing_host = landingHost(ad.landing_url);
+    out.landing_path = (function () {
+      try { return new URL(validHttpUrl(ad.landing_url)).pathname; } catch (e) { return ''; }
+    })();
+    out.landing_has_utm = /[?&]utm_/i.test(String(ad.landing_url || ''));
+    out.age_bucket = ageBucket(ad.days_active);
+    out.survivor_30d = (ad.is_active === true && Number(ad.days_active) >= 30) ? true : false;
+    out.media_expires_at = mediaExpiry(ad.video_hd_url || ad.image_url || ad.media_url);
+    return out;
+  }
+
+  function buildEnrichedRows() {
+    var rows = Object.keys(db).map(function (id) {
+      var copy = {};
+      Object.keys(db[id]).forEach(function (k) { copy[k] = db[id][k]; });
+      if (typeof copy.body === 'string') copy.body = collapseRepeats(copy.body);
+      return copy;
+    });
+    var variantCount = {};
+    var enriched = rows.map(function (ad) {
+      var sig = deriveSignals(ad);
+      var key = (ad.page_id || ad.page_name || '') + '::' + sig.copy_fingerprint;
+      if (sig.copy_fingerprint) variantCount[key] = (variantCount[key] || 0) + 1;
+      return { ad: ad, sig: sig, key: key };
+    });
+    enriched.forEach(function (item) {
+      item.sig.copy_variants = item.sig.copy_fingerprint ? variantCount[item.key] : '';
+    });
+    return enriched;
+  }
+
+  var BASE_CSV_FIELDS = [
+    'library_id','page_id','page_name','is_active','start_date','days_active',
+    'country','keyword','countries_seen','keywords_seen','observed_dates','body',
+    'title','caption','cta','landing_url','media_url','source','first_seen','last_seen','ad_library_url'
+  ];
+  var EXTRA_CSV_FIELDS = [
+    'schema_version','end_date','display_format','cta_type','platforms','link_description',
+    'card_count','image_count','video_count','card_titles','card_links',
+    'image_url','video_hd_url','video_sd_url','video_preview_url',
+    'page_like_count','page_categories','page_profile_uri','byline','disclaimer_label',
+    'branded_content','ai_generated','is_reshared','page_is_deleted',
+    'collation_id','collation_count','total_active_time','reach_estimate','spend','currency','reached_countries'
+  ];
+  var SIGNAL_CSV_FIELDS = [
+    'hook','word_count','emoji_count','hashtag_count','mention_count','ugc_style',
+    'has_offer','offer_percent','offer_amount','offer_threshold','discount_code','free_shipping','urgency',
+    'has_review','star_count','has_checklist','is_dynamic_template',
+    'copy_fingerprint','copy_variants','landing_host','landing_path','landing_has_utm',
+    'age_bucket','survivor_30d','media_expires_at'
+  ];
+
+  function csvCell(row, sig, field) {
+    var value;
+    if (field === 'card_titles') {
+      value = Array.isArray(row.cards) ? row.cards.map(function (c) { return c.title; }) : '';
+    } else if (field === 'card_links') {
+      value = Array.isArray(row.cards) ? row.cards.map(function (c) { return c.link_url; }) : '';
+    } else if (Object.prototype.hasOwnProperty.call(sig, field)) {
+      value = sig[field];
+    } else {
+      value = row[field];
+    }
+    if (Array.isArray(value)) value = value.join(' | ');
+    return csvEscape(value);
+  }
+
   function buildCSVData() {
-    var fields = [
-      'library_id','page_id','page_name','is_active','start_date','days_active',
-      'country','keyword','countries_seen','keywords_seen','observed_dates','body',
-      'title','caption','cta','landing_url','media_url','source','first_seen','last_seen','ad_library_url'
-    ];
-    var rows = Object.keys(db).map(function (id) { return db[id]; });
-    if (!rows.length) return null;
-    var csv = fields.join(',') + '\n' + rows.map(function (row) {
-      return fields.map(function (field) {
-        var value = row[field];
-        if (Array.isArray(value)) value = value.join(' | ');
-        return csvEscape(value);
-      }).join(',');
+    var items = buildEnrichedRows();
+    if (!items.length) return null;
+    var fields = BASE_CSV_FIELDS.concat(EXTRA_CSV_FIELDS).concat(SIGNAL_CSV_FIELDS);
+    var csv = fields.join(',') + '\n' + items.map(function (item) {
+      return fields.map(function (field) { return csvCell(item.ad, item.sig, field); }).join(',');
     }).join('\n');
     return {
       csv: '\ufeff' + csv,
@@ -560,16 +800,97 @@
     };
   }
 
-  function downloadCSVData(data) {
-    var blob = new Blob([data.csv], { type: 'text/csv;charset=utf-8' });
+  function groupSummary(g) {
+    var formats = {}, platforms = [], offers = [], codes = [], pageIds = [], libraryIds = [], fingerprints = [];
+    var likes = 0, withReview = 0, withVideo = 0, ugc = 0;
+    g.ads.forEach(function (ad) {
+      var sig = deriveSignals(ad);
+      var f = ad.display_format || 'UNKNOWN';
+      formats[f] = (formats[f] || 0) + 1;
+      toList(ad.platforms).forEach(function (pl) { uniqueAdd(platforms, pl); });
+      if (sig.offer_percent !== '') uniqueAdd(offers, sig.offer_percent + '%');
+      if (sig.offer_amount !== '') uniqueAdd(offers, sig.offer_amount + ' off');
+      if (sig.discount_code) uniqueAdd(codes, sig.discount_code);
+      uniqueAdd(pageIds, ad.page_id);
+      uniqueAdd(libraryIds, ad.library_id);
+      if (sig.copy_fingerprint) uniqueAdd(fingerprints, sig.copy_fingerprint);
+      var n = Number(ad.page_like_count);
+      if (isFinite(n) && n > likes) likes = n;
+      if (sig.has_review) withReview++;
+      if (ad.video_count > 0 || ad.display_format === 'VIDEO') withVideo++;
+      if (sig.ugc_style) ugc++;
+    });
+    return {
+      key: g.key,
+      display_name: g.displayName,
+      score: g.score,
+      label: g.label,
+      score_parts: g.scoreParts,
+      ads_count: g.ads.length,
+      distinct_copies: fingerprints.length,
+      oldest_days: g.oldestDays,
+      problem_ads: g.problemAds,
+      countries: g.countries,
+      observed_dates: g.observedDates,
+      landing_urls: g.landingUrls,
+      page_ids: pageIds,
+      page_like_count: likes || '',
+      formats: formats,
+      platforms: platforms,
+      offers: offers,
+      discount_codes: codes,
+      ads_with_review: withReview,
+      ads_with_video: withVideo,
+      ads_ugc_style: ugc,
+      sample_text: g.sampleText,
+      ad_library_url: g.adLibraryUrl,
+      library_ids: libraryIds
+    };
+  }
+
+  function buildJSONData() {
+    var items = buildEnrichedRows();
+    if (!items.length) return null;
+    var ads = items.map(function (item) {
+      var out = {};
+      Object.keys(item.ad).forEach(function (k) { out[k] = item.ad[k]; });
+      out.signals = item.sig;
+      return out;
+    });
+    var groups = buildGroups().map(groupSummary);
+    var payload = {
+      schema: 'tamper-ads/' + SCHEMA_VERSION,
+      script_version: VERSION,
+      exported_at: nowISO(),
+      query: { country: getParam('country') || 'ALL', keyword: getParam('q') || '' },
+      counts: { ads: ads.length, groups: groups.length },
+      groups: groups,
+      ads: ads
+    };
+    return {
+      json: JSON.stringify(payload, null, 1),
+      filename: 'meta-ads-' + (getParam('country') || 'ALL') + '-' + today() + '.json'
+    };
+  }
+
+  function downloadFile(content, filename, mime) {
+    var blob = new Blob([content], { type: mime });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = data.filename;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function downloadCSVData(data) {
+    downloadFile(data.csv, data.filename, 'text/csv;charset=utf-8');
+  }
+
+  function downloadJSONData(data) {
+    downloadFile(data.json, data.filename, 'application/json;charset=utf-8');
   }
 
   function exportCSV() {
@@ -581,33 +902,52 @@
     downloadCSVData(data);
   }
 
-  function shareCSV() {
-    var data = buildCSVData();
+  function exportJSON() {
+    var data = buildJSONData();
     if (!data) {
       alert('Nessuna inserzione raccolta.');
       return;
     }
+    downloadJSONData(data);
+  }
 
-    if (typeof File !== 'function' || typeof navigator.share !== 'function') {
-      downloadCSVData(data);
+  // Share CSV + JSON together (mobile share sheet); fall back to plain downloads.
+  function shareCSV() {
+    var csvData = buildCSVData();
+    var jsonData = buildJSONData();
+    if (!csvData || !jsonData) {
+      alert('Nessuna inserzione raccolta.');
       return;
     }
 
-    var file = new File([data.csv], data.filename, { type: 'text/csv;charset=utf-8' });
+    function fallback() {
+      downloadCSVData(csvData);
+      downloadJSONData(jsonData);
+    }
+
+    if (typeof File !== 'function' || typeof navigator.share !== 'function') {
+      fallback();
+      return;
+    }
+
+    var files = [
+      new File([csvData.csv], csvData.filename, { type: 'text/csv;charset=utf-8' }),
+      new File([jsonData.json], jsonData.filename, { type: 'application/json;charset=utf-8' })
+    ];
     var shareData = {
-      title: 'Meta Research CSV',
+      title: 'Meta Research export',
       text: dbCount() + ' ads raccolte - ' + VERSION,
-      files: [file]
+      files: files
     };
 
     if (typeof navigator.canShare === 'function') {
       try {
-        if (!navigator.canShare({ files: [file] })) {
-          downloadCSVData(data);
+        if (!navigator.canShare({ files: files })) {
+          fallback();
           return;
         }
       } catch (e) {
-        downloadCSVData(data);
+        fallback();
         return;
       }
     }
@@ -616,12 +956,12 @@
       navigator.share(shareData).catch(function (err) {
         if (err && err.name === 'AbortError') return;
         state.lastError = 'SHARE: ' + String(err && (err.message || err) || 'errore');
-        downloadCSVData(data);
+        fallback();
         updateUI();
       });
     } catch (e) {
       state.lastError = 'SHARE: ' + String(e);
-      downloadCSVData(data);
+      fallback();
       updateUI();
     }
   }
@@ -1100,6 +1440,7 @@
     row.appendChild(button('SCAN', scanScripts));
     row.appendChild(button('DIAGNOSI', showDiag));
     row.appendChild(button('CSV', exportCSV));
+    row.appendChild(button('JSON', exportJSON));
     row.appendChild(button('CONDIVIDI', shareCSV));
     row.appendChild(button('RESET', function () {
       if (!confirm('Cancellare il database Meta Research?')) return;
