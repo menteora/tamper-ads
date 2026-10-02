@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.6.0.0
+// @version      0.6.2.0
 // @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + rich CSV/JSON export (formats, platforms, cards, offer signals) for social-business-manager
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @connect      vps-fbad4a36.vps.ovh.net
 // @updateURL    https://raw.githubusercontent.com/menteora/tamper-ads/main/meta-research.user.js
 // @downloadURL  https://raw.githubusercontent.com/menteora/tamper-ads/main/meta-research.user.js
 // ==/UserScript==
@@ -14,8 +17,11 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v6.0.0 RADAR';
+  var VERSION = 'v6.2.0 RADAR';
   var SCHEMA_VERSION = 2;
+  var SBM_URL = 'https://vps-fbad4a36.vps.ovh.net:8443/api/ricevi';
+  var SBM_TOKEN_KEY = 'social_business_manager_token';
+  var SBM_PROJECT_KEY = 'social_business_manager_project';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -893,6 +899,90 @@
     downloadFile(data.json, data.filename, 'application/json;charset=utf-8');
   }
 
+  function radarToken() {
+    var token = clean(GM_getValue(SBM_TOKEN_KEY, ''));
+    if (token) return token;
+    token = clean(prompt('Incolla il token RADAR (SBM_TOKEN). Viene salvato solo nello storage privato di Tampermonkey.', '') || '');
+    if (!token) return '';
+    GM_setValue(SBM_TOKEN_KEY, token);
+    return token;
+  }
+
+  function radarProject() {
+    return clean(GM_getValue(SBM_PROJECT_KEY, 'roilla')).toLowerCase();
+  }
+
+  function saveRadarProject(value, showMessage) {
+    var progetto = clean(value).toLowerCase();
+    if (!progetto || progetto === 'ricerca' || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(progetto)) {
+      alert('Progetto non valido. Usa minuscole, numeri e trattini, massimo 40 caratteri; non usare "ricerca".');
+      return '';
+    }
+    GM_setValue(SBM_PROJECT_KEY, progetto);
+    if (ui.radarProject) ui.radarProject.value = progetto;
+    if (showMessage) alert('Progetto RADAR salvato: ' + progetto);
+    return progetto;
+  }
+
+  function sendSavedRadarProject() {
+    var progetto = saveRadarProject(ui.radarProject ? ui.radarProject.value : radarProject(), false);
+    if (progetto) sendRadar(progetto);
+  }
+
+  function sendRadar(progetto) {
+    var data = buildJSONData();
+    if (!data) {
+      alert('Nessuna inserzione raccolta.');
+      return;
+    }
+
+    var token = radarToken();
+    if (!token) return;
+
+    var form = new FormData();
+    form.append('operazione', 'ad-library');
+    form.append('progetto', progetto || '');
+    if (!progetto) form.append('ricerca', getParam('q') || '');
+    form.append('file', new Blob([data.json], { type: 'application/json' }), data.filename);
+
+    if (ui.status) ui.status.textContent = 'INVIO RADAR...';
+
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: SBM_URL,
+      headers: { Authorization: 'Bearer ' + token },
+      data: form,
+      timeout: 30000,
+      onload: function (r) {
+        var body = null;
+        try { body = JSON.parse(r.responseText || '{}'); } catch (e) {}
+
+        if (r.status >= 200 && r.status < 300) {
+          var nuovi = body && body.nuovi !== undefined ? body.nuovi : '?';
+          var noti = body && body.gia_noti !== undefined ? body.gia_noti : '?';
+          var errori = body && Array.isArray(body.errori) ? body.errori.length : 0;
+          alert('RADAR: invio completato. Nuovi ' + nuovi + ', gia noti ' + noti + ', errori ' + errori + '.');
+        } else {
+          if (r.status === 401) GM_setValue(SBM_TOKEN_KEY, '');
+          var dettaglio = body && body.detail ? body.detail : (r.responseText || '').slice(0, 500);
+          state.lastError = 'RADAR HTTP ' + r.status + ': ' + dettaglio;
+          alert('RADAR: errore HTTP ' + r.status + '. ' + dettaglio + (r.status === 401 ? ' Il token salvato e stato cancellato.' : ''));
+        }
+        updateUI();
+      },
+      onerror: function (e) {
+        state.lastError = 'RADAR RETE: ' + String(e && (e.error || e.message || e) || 'errore');
+        alert('RADAR: errore di rete. Apri DIAGNOSI per i dettagli.');
+        updateUI();
+      },
+      ontimeout: function () {
+        state.lastError = 'RADAR RETE: timeout';
+        alert('RADAR: richiesta scaduta (timeout).');
+        updateUI();
+      }
+    });
+  }
+
   function exportCSV() {
     var data = buildCSVData();
     if (!data) {
@@ -1435,12 +1525,27 @@
     controls.appendChild(button('STOP', stop));
     box.appendChild(controls);
 
+    var radarSettings = make('div');
+    radarSettings.style.cssText = 'display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:4px 0;';
+    radarSettings.appendChild(make('span', 'Progetto '));
+    ui.radarProject = make('input');
+    ui.radarProject.type = 'text';
+    ui.radarProject.value = radarProject();
+    ui.radarProject.placeholder = 'es. roilla';
+    ui.radarProject.maxLength = 40;
+    ui.radarProject.style.cssText = 'width:120px;box-sizing:border-box;';
+    radarSettings.appendChild(ui.radarProject);
+    radarSettings.appendChild(button('SALVA', function () { saveRadarProject(ui.radarProject.value, true); }));
+    box.appendChild(radarSettings);
+
     var row = make('div');
     row.appendChild(button('ANALISI', showAnalysis));
     row.appendChild(button('SCAN', scanScripts));
     row.appendChild(button('DIAGNOSI', showDiag));
     row.appendChild(button('CSV', exportCSV));
     row.appendChild(button('JSON', exportJSON));
+    row.appendChild(button('RADAR PROGETTO', sendSavedRadarProject));
+    row.appendChild(button('RADAR RICERCA', function () { sendRadar(''); }));
     row.appendChild(button('CONDIVIDI', shareCSV));
     row.appendChild(button('RESET', function () {
       if (!confirm('Cancellare il database Meta Research?')) return;
