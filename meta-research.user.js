@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.6.2.0
+// @version      0.6.3.0
 // @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + rich CSV/JSON export (formats, platforms, cards, offer signals) for social-business-manager
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
@@ -9,7 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @connect      vps-fbad4a36.vps.ovh.net
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/menteora/tamper-ads/main/meta-research.user.js
 // @downloadURL  https://raw.githubusercontent.com/menteora/tamper-ads/main/meta-research.user.js
 // ==/UserScript==
@@ -17,9 +17,10 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v6.2.0 RADAR';
+  var VERSION = 'v6.3.0 RADAR';
   var SCHEMA_VERSION = 2;
-  var SBM_URL = 'https://vps-fbad4a36.vps.ovh.net:8443/api/ricevi';
+  var SBM_DEFAULT_URL = 'https://vps-fbad4a36.vps.ovh.net:8443/api/ricevi';
+  var SBM_URL_KEY = 'social_business_manager_url';
   var SBM_TOKEN_KEY = 'social_business_manager_token';
   var SBM_PROJECT_KEY = 'social_business_manager_project';
   var DB_KEY = 'meta_ad_research_v53_radar';
@@ -899,12 +900,49 @@
     downloadFile(data.json, data.filename, 'application/json;charset=utf-8');
   }
 
+  function radarServer() {
+    return clean(GM_getValue(SBM_URL_KEY, SBM_DEFAULT_URL)) || SBM_DEFAULT_URL;
+  }
+
+  function normalizeRadarServer(value) {
+    var raw = clean(value);
+    if (!raw) return '';
+    try {
+      var url = new URL(raw);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+      if (!url.pathname || url.pathname === '/') url.pathname = '/api/ricevi';
+      return url.href.replace(/\/$/, '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function saveRadarServer(value, showMessage) {
+    var server = normalizeRadarServer(value);
+    if (!server) {
+      alert('Server non valido. Usa un URL http o https, per esempio https://server.example:8443/api/ricevi');
+      return '';
+    }
+    GM_setValue(SBM_URL_KEY, server);
+    if (ui.radarServer) ui.radarServer.value = server;
+    if (showMessage) alert('Server RADAR salvato.');
+    return server;
+  }
+
   function radarToken() {
-    var token = clean(GM_getValue(SBM_TOKEN_KEY, ''));
-    if (token) return token;
-    token = clean(prompt('Incolla il token RADAR (SBM_TOKEN). Viene salvato solo nello storage privato di Tampermonkey.', '') || '');
-    if (!token) return '';
+    return clean(GM_getValue(SBM_TOKEN_KEY, ''));
+  }
+
+  function saveRadarToken(value, showMessage) {
+    var token = clean(value);
+    if (!token) {
+      alert('Inserisci il token RADAR.');
+      return '';
+    }
     GM_setValue(SBM_TOKEN_KEY, token);
+    if (ui.radarToken) ui.radarToken.value = '';
+    if (ui.radarTokenStatus) ui.radarTokenStatus.textContent = 'TOKEN SALVATO';
+    if (showMessage) alert('Token RADAR salvato nello storage privato di Tampermonkey.');
     return token;
   }
 
@@ -936,8 +974,15 @@
       return;
     }
 
+    var server = saveRadarServer(ui.radarServer ? ui.radarServer.value : radarServer(), false);
+    if (!server) return;
+
     var token = radarToken();
-    if (!token) return;
+    if (!token) {
+      alert('Prima salva il token RADAR.');
+      if (ui.radarToken) ui.radarToken.focus();
+      return;
+    }
 
     var form = new FormData();
     form.append('operazione', 'ad-library');
@@ -949,7 +994,7 @@
 
     GM_xmlhttpRequest({
       method: 'POST',
-      url: SBM_URL,
+      url: server,
       headers: { Authorization: 'Bearer ' + token },
       data: form,
       timeout: 30000,
@@ -1526,16 +1571,42 @@
     box.appendChild(controls);
 
     var radarSettings = make('div');
-    radarSettings.style.cssText = 'display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:4px 0;';
-    radarSettings.appendChild(make('span', 'Progetto '));
+    radarSettings.style.cssText = 'display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:5px;margin:4px 0;';
+
+    radarSettings.appendChild(make('span', 'Server'));
+    ui.radarServer = make('input');
+    ui.radarServer.type = 'text';
+    ui.radarServer.value = radarServer();
+    ui.radarServer.placeholder = SBM_DEFAULT_URL;
+    ui.radarServer.style.cssText = 'min-width:0;width:100%;box-sizing:border-box;';
+    radarSettings.appendChild(ui.radarServer);
+    radarSettings.appendChild(button('SALVA SERVER', function () { saveRadarServer(ui.radarServer.value, true); }));
+
+    radarSettings.appendChild(make('span', 'Token'));
+    var tokenWrap = make('div');
+    tokenWrap.style.cssText = 'display:flex;align-items:center;gap:5px;min-width:0;';
+    ui.radarToken = make('input');
+    ui.radarToken.type = 'password';
+    ui.radarToken.placeholder = radarToken() ? 'Token gia salvato' : 'Incolla token';
+    ui.radarToken.autocomplete = 'off';
+    ui.radarToken.style.cssText = 'min-width:0;width:100%;box-sizing:border-box;';
+    tokenWrap.appendChild(ui.radarToken);
+    ui.radarTokenStatus = make('span', radarToken() ? 'TOKEN SALVATO' : 'TOKEN MANCANTE');
+    ui.radarTokenStatus.style.cssText = 'font-size:9px;white-space:nowrap;color:#aaa;';
+    tokenWrap.appendChild(ui.radarTokenStatus);
+    radarSettings.appendChild(tokenWrap);
+    radarSettings.appendChild(button('SALVA TOKEN', function () { saveRadarToken(ui.radarToken.value, true); }));
+
+    radarSettings.appendChild(make('span', 'Progetto'));
     ui.radarProject = make('input');
     ui.radarProject.type = 'text';
     ui.radarProject.value = radarProject();
     ui.radarProject.placeholder = 'es. roilla';
     ui.radarProject.maxLength = 40;
-    ui.radarProject.style.cssText = 'width:120px;box-sizing:border-box;';
+    ui.radarProject.style.cssText = 'min-width:0;width:100%;box-sizing:border-box;';
     radarSettings.appendChild(ui.radarProject);
-    radarSettings.appendChild(button('SALVA', function () { saveRadarProject(ui.radarProject.value, true); }));
+    radarSettings.appendChild(button('SALVA PROGETTO', function () { saveRadarProject(ui.radarProject.value, true); }));
+
     box.appendChild(radarSettings);
 
     var row = make('div');
@@ -1544,8 +1615,8 @@
     row.appendChild(button('DIAGNOSI', showDiag));
     row.appendChild(button('CSV', exportCSV));
     row.appendChild(button('JSON', exportJSON));
-    row.appendChild(button('RADAR PROGETTO', sendSavedRadarProject));
-    row.appendChild(button('RADAR RICERCA', function () { sendRadar(''); }));
+    row.appendChild(button('INVIA PROGETTO', sendSavedRadarProject));
+    row.appendChild(button('INVIA RICERCA', function () { sendRadar(''); }));
     row.appendChild(button('CONDIVIDI', shareCSV));
     row.appendChild(button('RESET', function () {
       if (!confirm('Cancellare il database Meta Research?')) return;
