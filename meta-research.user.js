@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Meta Ad Library Research RADAR
 // @namespace    meta.research.local
-// @version      0.6.1.0
+// @version      0.6.2.0
 // @description  Mobile-safe Meta Ad Library collector + Opportunity Radar + rich CSV/JSON export (formats, platforms, cards, offer signals) for social-business-manager
 // @match        https://www.facebook.com/ads/library/*
 // @match        https://*.facebook.com/ads/library/*
@@ -17,10 +17,11 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v6.1.0 RADAR';
+  var VERSION = 'v6.2.0 RADAR';
   var SCHEMA_VERSION = 2;
   var SBM_URL = 'https://vps-fbad4a36.vps.ovh.net:8443/api/ricevi';
   var SBM_TOKEN_KEY = 'social_business_manager_token';
+  var SBM_PROJECT_KEY = 'social_business_manager_project';
   var DB_KEY = 'meta_ad_research_v53_radar';
   var LEGACY_KEYS = [
     'meta_ad_research_v52_core',
@@ -907,6 +908,27 @@
     return token;
   }
 
+  function radarProject() {
+    return clean(GM_getValue(SBM_PROJECT_KEY, 'roilla')).toLowerCase();
+  }
+
+  function saveRadarProject(value, showMessage) {
+    var progetto = clean(value).toLowerCase();
+    if (!progetto || progetto === 'ricerca' || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(progetto)) {
+      alert('Progetto non valido. Usa minuscole, numeri e trattini, massimo 40 caratteri; non usare "ricerca".');
+      return '';
+    }
+    GM_setValue(SBM_PROJECT_KEY, progetto);
+    if (ui.radarProject) ui.radarProject.value = progetto;
+    if (showMessage) alert('Progetto RADAR salvato: ' + progetto);
+    return progetto;
+  }
+
+  function sendSavedRadarProject() {
+    var progetto = saveRadarProject(ui.radarProject ? ui.radarProject.value : radarProject(), false);
+    if (progetto) sendRadar(progetto);
+  }
+
   function sendRadar(progetto) {
     var data = buildJSONData();
     if (!data) {
@@ -1503,13 +1525,26 @@
     controls.appendChild(button('STOP', stop));
     box.appendChild(controls);
 
+    var radarSettings = make('div');
+    radarSettings.style.cssText = 'display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:4px 0;';
+    radarSettings.appendChild(make('span', 'Progetto '));
+    ui.radarProject = make('input');
+    ui.radarProject.type = 'text';
+    ui.radarProject.value = radarProject();
+    ui.radarProject.placeholder = 'es. roilla';
+    ui.radarProject.maxLength = 40;
+    ui.radarProject.style.cssText = 'width:120px;box-sizing:border-box;';
+    radarSettings.appendChild(ui.radarProject);
+    radarSettings.appendChild(button('SALVA', function () { saveRadarProject(ui.radarProject.value, true); }));
+    box.appendChild(radarSettings);
+
     var row = make('div');
     row.appendChild(button('ANALISI', showAnalysis));
     row.appendChild(button('SCAN', scanScripts));
     row.appendChild(button('DIAGNOSI', showDiag));
     row.appendChild(button('CSV', exportCSV));
     row.appendChild(button('JSON', exportJSON));
-    row.appendChild(button('RADAR ROILLA', function () { sendRadar('roilla'); }));
+    row.appendChild(button('RADAR PROGETTO', sendSavedRadarProject));
     row.appendChild(button('RADAR RICERCA', function () { sendRadar(''); }));
     row.appendChild(button('CONDIVIDI', shareCSV));
     row.appendChild(button('RESET', function () {
